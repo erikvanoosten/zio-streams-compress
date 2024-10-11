@@ -7,15 +7,17 @@ Heavily inspired by [fs2-compress](https://github.com/lhns/fs2-compress).
 
 ### build.sbt
 
+NOTE: `zio-streams-compress` IS NOT ACTUALLY RELEASED YET!
+
 ```sbt
-libraryDependencies += "dev.zio" %% "zio-streams-compress-gzip" % "2.1.0"
-libraryDependencies += "dev.zio" %% "zio-streams-compress-zip" % "2.1.0"
-libraryDependencies += "dev.zio" %% "zio-streams-compress-zip4j" % "2.1.0"
-libraryDependencies += "dev.zio" %% "zio-streams-compress-tar" % "2.1.0"
-libraryDependencies += "dev.zio" %% "zio-streams-compress-bzip2" % "2.1.0"
-libraryDependencies += "dev.zio" %% "zio-streams-compress-zstd" % "2.1.0"
-libraryDependencies += "dev.zio" %% "zio-streams-compress-brotli" % "2.1.0"
-libraryDependencies += "dev.zio" %% "zio-streams-compress-lz4" % "2.1.0"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-gzip" % "0.0.1"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-zip" % "0.0.1"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-zip4j" % "0.0.1"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-tar" % "0.0.1"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-bzip2" % "0.0.1"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-zstd" % "0.0.1"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-brotli" % "0.0.1"
+libraryDependencies += "dev.zio" %% "zio-streams-compress-lz4" % "0.0.1"
 ```
 
 Currently only jvm is supported. PRs for scala-js and scala-native are welcome.
@@ -24,7 +26,7 @@ Currently only jvm is supported. PRs for scala-js and scala-native are welcome.
 
 ```scala
 import zio._
-import zio.compress.{ArchiveEntry, GzipDecompressor, TarUnarchiver, ZipArchiver}
+import zio.compress.{ArchiveEntry, GzipCompressor, GzipDecompressor, TarUnarchiver, ZipArchiver}
 import zio.stream._
 
 import java.nio.charset.StandardCharsets.UTF_8
@@ -35,7 +37,7 @@ object ExampleApp extends ZIOAppDefault {
       // Compress a file with GZIP
       _ <- ZStream
         .fromFileName("file")
-        .via(GzipDecompressor.make().decompress)
+        .via(GzipCompressor.make().compress)
         .run(ZSink.fromFileName("file.gz"))
 
       // List all items in a gzip tar archive:
@@ -58,9 +60,9 @@ object ExampleApp extends ZIOAppDefault {
     } yield ()
 
   private def archiveEntry(
-      name: String,
-      content: Array[Byte]
-  ): (ArchiveEntry[Some, Any], ZStream[Any, Throwable, Byte]) = {
+                            name: String,
+                            content: Array[Byte]
+                          ): (ArchiveEntry[Some, Any], ZStream[Any, Throwable, Byte]) = {
     (ArchiveEntry(name, Some(content.length)), ZStream.fromIterable(content))
   }
 

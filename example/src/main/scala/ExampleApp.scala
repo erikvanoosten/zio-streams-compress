@@ -1,5 +1,5 @@
 import zio._
-import zio.compress.{ArchiveEntry, GzipDecompressor, TarUnarchiver, ZipArchiver}
+import zio.compress.{ArchiveEntry, GzipCompressor, GzipDecompressor, TarUnarchiver, ZipArchiver}
 import zio.stream._
 
 import java.nio.charset.StandardCharsets.UTF_8
@@ -10,7 +10,7 @@ object ExampleApp extends ZIOAppDefault {
       // Compress a file with GZIP
       _ <- ZStream
         .fromFileName("file")
-        .via(GzipDecompressor.make().decompress)
+        .via(GzipCompressor.make().compress)
         .run(ZSink.fromFileName("file.gz"))
 
       // List all items in a gzip tar archive:
