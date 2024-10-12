@@ -24,16 +24,17 @@ private[compress] object JavaIoInterop {
       ZStream.unwrapScoped {
         for {
           queue <- ZIO.acquireRelease(Queue.bounded[Take[Nothing, Byte]](queueSize))(_.shutdown)
-          streamError <- Promise.make[Throwable, Nothing]
+          streamEnd <- Promise.make[Throwable, Unit]
           _ <- stream.chunks
             .map(Take.chunk)
             .run(ZSink.fromQueue(queue))
             .zipLeft(queue.offer(Take.end))
-            .onError(cause => streamError.failCause(cause))
+            .intoPromise(streamEnd)
             .forkScoped
           queueInputStream <- ZStream.fromQueue(queue).flattenTake.toInputStream
           result <- streamReader(queueInputStream)
-        } yield result.interruptWhen(streamError)
+          _ <- ZIO.addFinalizer(streamEnd.await.orDie)
+        } yield result.interruptWhen(streamEnd)
       }
     }
 
@@ -62,12 +63,13 @@ private[compress] object JavaIoInterop {
             val queueOutputStream = new BufferedOutputStream(new QueueOutputStream(runtime, queue), chunkSize)
             ZIO.attemptBlocking(makeOutputStream(queueOutputStream))
           }
-          streamError <- Promise.make[Throwable, Nothing]
+          streamEnd <- Promise.make[Throwable, Unit]
           _ <- streamWriter(stream, outputStream)
-            .onError(cause => streamError.failCause(cause))
+            .intoPromise(streamEnd)
             .ensuring(ZIO.attemptBlocking(outputStream.close()).orDie)
             .forkScoped
-        } yield ZStream.fromQueue(queue).flattenTake.interruptWhen(streamError)
+          _ <- ZIO.addFinalizer(streamEnd.await.orDie)
+        } yield ZStream.fromQueue(queue).flattenTake.interruptWhen(streamEnd)
       }
     }
 }
