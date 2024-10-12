@@ -23,18 +23,18 @@ private[compress] object JavaIoInterop {
     ZPipeline.fromFunction[Any, Throwable, Byte, Out] { stream =>
       ZStream.unwrapScoped {
         for {
-          queue <- ZIO.acquireRelease(Queue.bounded[Take[Nothing, Byte]](queueSize))(_.shutdown)
-          streamEnd <- Promise.make[Throwable, Unit]
+          queue <- ZIO.acquireRelease(Queue.bounded[Take[Throwable, Byte]](queueSize))(_.shutdown)
           _ <- stream.chunks
             .map(Take.chunk)
             .run(ZSink.fromQueue(queue))
-            .zipLeft(queue.offer(Take.end))
-            .intoPromise(streamEnd)
+            .onDoneCause(
+              cause => queue.offer(Take.failCause(cause)),
+              _ => queue.offer(Take.end)
+            )
             .forkScoped
           queueInputStream <- ZStream.fromQueue(queue).flattenTake.toInputStream
           result <- streamReader(queueInputStream)
-          _ <- ZIO.addFinalizer(streamEnd.await.orDie)
-        } yield result.interruptWhen(streamEnd)
+        } yield result
       }
     }
 
@@ -58,24 +58,23 @@ private[compress] object JavaIoInterop {
       ZStream.unwrapScoped {
         for {
           runtime <- ZIO.runtime[Any]
-          queue <- ZIO.acquireRelease(Queue.bounded[Take[Nothing, Byte]](queueSize))(_.shutdown)
+          queue <- ZIO.acquireRelease(Queue.bounded[Take[Throwable, Byte]](queueSize))(_.shutdown)
           outputStream <- {
             val queueOutputStream = new BufferedOutputStream(new QueueOutputStream(runtime, queue), chunkSize)
             ZIO.attemptBlocking(makeOutputStream(queueOutputStream))
           }
-          streamEnd <- Promise.make[Throwable, Unit]
           _ <- streamWriter(stream, outputStream)
-            .intoPromise(streamEnd)
-            .ensuring(ZIO.attemptBlocking(outputStream.close()).orDie)
+            .onDoneCause(
+              cause => queue.offer(Take.failCause(cause)),
+              _ => ZIO.attemptBlocking(outputStream.close()).orDie
+            )
             .forkScoped
-          _ <- ZIO.addFinalizer(streamEnd.await.orDie)
-        } yield ZStream.fromQueue(queue).flattenTake.interruptWhen(streamEnd)
+        } yield ZStream.fromQueue(queue).flattenTake
       }
     }
 }
 
-private[compress] class QueueOutputStream(runtime: Runtime[Any], queue: Queue[Take[Nothing, Byte]])
-    extends OutputStream {
+private[compress] class QueueOutputStream[E](runtime: Runtime[Any], queue: Queue[Take[E, Byte]]) extends OutputStream {
   override def write(b: Int): Unit =
     offer(Take.single(b.toByte))
 
