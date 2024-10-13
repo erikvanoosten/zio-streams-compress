@@ -72,7 +72,7 @@ object ExampleApp extends ZIOAppDefault {
 ## Running the tests
 
 ```shell
-SBT_OPTS=-Xmx4G sbt test
+SBT_OPTS="-Xmx4G -XX:+UseG1GC" sbt test
 ```
 
 ## License

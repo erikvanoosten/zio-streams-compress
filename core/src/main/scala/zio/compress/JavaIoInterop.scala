@@ -7,6 +7,17 @@ import java.io.{BufferedOutputStream, InputStream, OutputStream}
 
 private[compress] object JavaIoInterop {
 
+  /** Makes a pipeline that makes the incoming ZStream available for reading via an InputStream. This InputStream can
+    * then be wrapped by `makeInputStream`. All bytes read from the wrapped InputStream are put in the outgoing ZStream.
+    *
+    * @param makeInputStream
+    *   Create the wrapped InputStream.
+    * @param queueSize
+    *   Chunks of the incoming ZStream go through an internal queue. This parameter determines the size of that queue.
+    *   Defaults to 2.
+    * @return
+    *   The created pipeline.
+    */
   def viaInputStreamByte(
       makeInputStream: InputStream => InputStream,
       queueSize: Int = Defaults.DefaultChunkedQueueSize
@@ -15,6 +26,18 @@ private[compress] object JavaIoInterop {
       ZIO.attemptBlocking(ZStream.fromInputStream(makeInputStream(inputStream)))
     }
 
+  /** Makes a pipeline that makes the incoming ZStream available for reading via an InputStream. This is then used by
+    * function `streamReader` to produce the outgoing ZStream.
+    *
+    * @param queueSize
+    *   Chunks of the incoming ZStream go through an internal queue. This parameter determines the size of that queue.
+    *   Defaults to 2.
+    * @param streamReader
+    *   A ZIO that reads from the given incoming InputStream to produce the outgoing ZStream. The outgoing ZStream must
+    *   end when the InputStream closes.
+    * @return
+    *   The created pipeline.
+    */
   def viaInputStream[Out](
       queueSize: Int = Defaults.DefaultChunkedQueueSize
   )(
@@ -38,6 +61,12 @@ private[compress] object JavaIoInterop {
       }
     }
 
+  /** Makes a pipeline that captures the output of an OutputStream (created by `makeOutputStream`) and makes it
+    * available as the outgoing ZStream. The incoming ZStream of bytes is written to the OutputStream.
+    *
+    * @see
+    *   [[viaOutputStream]]
+    */
   def viaOutputStreamByte(
       makeOutputStream: OutputStream => OutputStream,
       chunkSize: Int = Defaults.DefaultChunkSize,
@@ -47,6 +76,33 @@ private[compress] object JavaIoInterop {
       stream.runForeachChunk(chunk => ZIO.attemptBlocking(outputStream.write(chunk.toArray)))
     }
 
+  /** Makes a pipeline that captures the output of an OutputStream of type `OS` (created by `makeOutputStream`) and
+    * makes it available as the outgoing ZStream. The input ZStream (with items of type `In`) is written to the
+    * OutputStream by `streamWriter`.
+    *
+    * Many of these OutputStreams immediately start writing to their underlying outputStream from their constructor.
+    * (Usually just a few bytes, for example a magic header indicating file type.) Since the internal queue is bounded
+    * (see `queueSize`), and the queue reader starts last, the output stream is buffered. The buffer needs to be large
+    * enough to fit all the initially written data. Each time the buffer fills up, the pipeline produces a chunk in the
+    * outgoing ZStream. Therefore, the buffer size is set with the `chunkSize` parameter. With the default settings we
+    * get large buffers and a small queue.
+    *
+    * @param makeOutputStream
+    *   Create the wrapped OutputStream.
+    * @param chunkSize
+    *   The internal buffer size, also the chunk size of the outgoing ZStream, defaults to 64KiB.
+    * @param queueSize
+    *   The internal queue size, defaults to 2.
+    * @param streamWriter
+    *   Function that writes items from the given incoming ZStream to the given OutputStream. The OutputStream should
+    *   _not_ be closed when the stream ends.
+    * @tparam In
+    *   Type of incoming items.
+    * @tparam OS
+    *   Type of the OutputStream.
+    * @return
+    *   The created pipeline.
+    */
   def viaOutputStream[In, OS <: OutputStream](
       makeOutputStream: OutputStream => OS,
       chunkSize: Int = Defaults.DefaultChunkSize,
@@ -59,15 +115,20 @@ private[compress] object JavaIoInterop {
         for {
           runtime <- ZIO.runtime[Any]
           queue <- ZIO.acquireRelease(Queue.bounded[Take[Throwable, Byte]](queueSize))(_.shutdown)
-          outputStream <- {
-            val queueOutputStream = new BufferedOutputStream(new QueueOutputStream(runtime, queue), chunkSize)
-            ZIO.attemptBlocking(makeOutputStream(queueOutputStream))
-          }
-          _ <- streamWriter(stream, outputStream)
-            .onDoneCause(
-              cause => queue.offer(Take.failCause(cause)),
-              _ => ZIO.attemptBlocking(outputStream.close()).orDie
-            )
+          // Note that we need to close the result from `makeOutputStream`. Therefore, `makeOutputStream` can not be
+          // executed as a part of `streamWriter`.
+          _ <- ZIO
+            .attemptBlocking {
+              val queueOutputStream = new BufferedOutputStream(new QueueOutputStream(runtime, queue), chunkSize)
+              makeOutputStream(queueOutputStream)
+            }
+            .flatMap { outputStream =>
+              streamWriter(stream, outputStream)
+                .onDoneCause(
+                  cause => queue.offer(Take.failCause(cause)),
+                  _ => ZIO.attemptBlocking(outputStream.close()).orDie
+                )
+            }
             .forkScoped
         } yield ZStream.fromQueue(queue).flattenTake
       }
