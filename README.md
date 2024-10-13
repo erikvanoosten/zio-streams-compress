@@ -60,12 +60,11 @@ object ExampleApp extends ZIOAppDefault {
     } yield ()
 
   private def archiveEntry(
-                            name: String,
-                            content: Array[Byte]
-                          ): (ArchiveEntry[Some, Any], ZStream[Any, Throwable, Byte]) = {
+      name: String,
+      content: Array[Byte]
+  ): (ArchiveEntry[Some, Any], ZStream[Any, Throwable, Byte]) = {
     (ArchiveEntry(name, Some(content.length)), ZStream.fromIterable(content))
   }
-
 }
 ```
 
