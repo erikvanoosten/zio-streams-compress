@@ -9,10 +9,14 @@ import zio.compress.JavaIoInterop._
 import zio.compress.Tar._
 import zio.stream._
 
-import java.io.IOException
+import java.io.{BufferedInputStream, IOException}
 import java.nio.file.attribute.FileTime
 
 object TarArchiver {
+
+  /** Makes a pipeline that accepts a stream of archive entries (with size), and produces a byte stream of a Tar
+    * archive.
+    */
   def make(): TarArchiver =
     new TarArchiver()
 }
@@ -33,16 +37,24 @@ class TarArchiver private extends Archiver[Some] {
 }
 
 object TarUnarchiver {
+
+  /** Makes a pipeline that accepts a byte stream of a Tar archive, and produces a stream of archive entries.
+    *
+    * @param chunkSize
+    *   chunkSize of the archive entry content streams. Defaults to 64KiB.
+    */
   def make(chunkSize: Int = Defaults.DefaultChunkSize): TarUnarchiver =
     new TarUnarchiver(chunkSize)
 }
 
 class TarUnarchiver private (chunkSize: Int) extends Unarchiver[Option, TarArchiveEntry] {
-  override def unarchive: ZPipeline[Any, Throwable, Byte, (ArchiveEntry[Option, TarArchiveEntry], ZStream[Any, IOException, Byte])] =
-    viaInputStream[(ArchiveEntry[Option, TarArchiveEntry], ZStream[Any, IOException, Byte])](chunkSize) { inputStream =>
+  override def unarchive
+      : ZPipeline[Any, Throwable, Byte, (ArchiveEntry[Option, TarArchiveEntry], ZStream[Any, IOException, Byte])] =
+    viaInputStream[(ArchiveEntry[Option, TarArchiveEntry], ZStream[Any, IOException, Byte])]() { inputStream =>
       for {
-        tarInputStream <- ZIO.acquireRelease(ZIO.attemptBlocking(new TarArchiveInputStream(inputStream))) { tarInputStream =>
-          ZIO.attemptBlocking(tarInputStream.close()).orDie
+        tarInputStream <- ZIO.acquireRelease(ZIO.attemptBlocking(new TarArchiveInputStream(inputStream))) {
+          tarInputStream =>
+            ZIO.attemptBlocking(tarInputStream.close()).orDie
         }
       } yield {
         ZStream.repeatZIOOption {
@@ -50,7 +62,9 @@ class TarUnarchiver private (chunkSize: Int) extends Unarchiver[Option, TarArchi
             entry <- ZIO.attemptBlocking(Option(tarInputStream.getNextEntry)).some
           } yield {
             val archiveEntry = ArchiveEntry.fromUnderlying(entry)
-            (archiveEntry, ZStream.fromInputStream(tarInputStream, chunkSize))
+            // TarArchiveInputStream.read does not try to read the requested number of bytes, but it does have a good
+            // `available()` implementation, so with buffering we can still get full chunks.
+            (archiveEntry, ZStream.fromInputStream(new BufferedInputStream(tarInputStream, chunkSize), chunkSize))
           }
         }
       }

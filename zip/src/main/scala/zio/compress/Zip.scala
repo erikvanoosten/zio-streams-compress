@@ -19,16 +19,28 @@ object ZipMethod {
 }
 
 object ZipArchiver {
-  def make(method: ZipMethod = ZipMethod.Deflated, level: Option[CompressionLevel] = None): ZipArchiver =
-    new ZipArchiver(method, level.filter(_ != CompressionLevel.DefaultCompression))
+
+  /** Makes a pipeline that accepts a stream of archive entries (with size), and produces a byte stream of a Zip
+    * archive.
+    *
+    * @param level
+    *   compression level (only applicable for method 'deflated'). Currently defaults to level 6.
+    * @param method
+    *   compression method: stored or deflated. Defaults to `ZipMethod.Deflated`.
+    */
+  def make(
+      level: Option[CompressionLevel] = None,
+      method: ZipMethod = ZipMethod.Deflated
+  ): ZipArchiver =
+    new ZipArchiver(level.filter(_ != CompressionLevel.DefaultCompression), method)
 }
 
-class ZipArchiver private (method: ZipMethod, level: Option[CompressionLevel]) extends Archiver[Some] {
+class ZipArchiver private (level: Option[CompressionLevel], method: ZipMethod) extends Archiver[Some] {
   override def archive: ZPipeline[Any, Throwable, (ArchiveEntry[Some, Any], ZStream[Any, Throwable, Byte]), Byte] =
     viaOutputStream { outputStream =>
       val zipOutputStream = new ZipOutputStream(outputStream)
-      zipOutputStream.setMethod(method.jValue)
       level.foreach(l => zipOutputStream.setLevel(l.jValue))
+      zipOutputStream.setMethod(method.jValue)
       zipOutputStream
     } { case (entryStream, zipOutputStream) =>
       entryStream
@@ -44,6 +56,12 @@ class ZipArchiver private (method: ZipMethod, level: Option[CompressionLevel]) e
 }
 
 object ZipUnarchiver {
+
+  /** Makes a pipeline that accepts a byte stream of a ZIP archive, and produces a stream of archive entries.
+    *
+    * @param chunkSize
+    *   chunkSize of the archive entry content streams. Defaults to 64KiB.
+    */
   def make(chunkSize: Int = Defaults.DefaultChunkSize): ZipUnarchiver =
     new ZipUnarchiver(chunkSize)
 }
@@ -51,7 +69,7 @@ object ZipUnarchiver {
 class ZipUnarchiver private (chunkSize: Int) extends Unarchiver[Option, ZipEntry] {
   override def unarchive
       : ZPipeline[Any, Throwable, Byte, (ArchiveEntry[Option, ZipEntry], ZStream[Any, IOException, Byte])] =
-    viaInputStream[(ArchiveEntry[Option, ZipEntry], ZStream[Any, IOException, Byte])](chunkSize) { inputStream =>
+    viaInputStream[(ArchiveEntry[Option, ZipEntry], ZStream[Any, IOException, Byte])]() { inputStream =>
       for {
         zipInputStream <- ZIO.acquireRelease(ZIO.attemptBlocking(new ZipInputStream(inputStream))) { zipInputStream =>
           ZIO.attemptBlocking(zipInputStream.close()).orDie
@@ -62,6 +80,8 @@ class ZipUnarchiver private (chunkSize: Int) extends Unarchiver[Option, ZipEntry
             entry <- ZIO.attemptBlocking(Option(zipInputStream.getNextEntry)).some
           } yield {
             val archiveEntry = ArchiveEntry.fromUnderlying(entry)
+            // ZipInputStream.read seems to do its best to read to request the requested number of bytes. No buffering
+            // is needed.
             (archiveEntry, ZStream.fromInputStream(zipInputStream, chunkSize))
           }
         }

@@ -10,27 +10,50 @@ private[compress] object JavaIoInterop {
   /** Makes a pipeline that makes the incoming ZStream available for reading via an InputStream. This InputStream can
     * then be wrapped by `makeInputStream`. All bytes read from the wrapped InputStream are put in the outgoing ZStream.
     *
-    * @param makeInputStream
-    *   Create the wrapped InputStream.
+    * This illustrates how data flows in the pipeline implementation:
+    * {{{
+    * Incoming ZStream --> queue <-- InputStream <-- wrapped InputStream <-- outgoing ZStream
+    *
+    * --> push
+    * <-- pull
+    * }}}
+    *
+    * This implementation always tries to read `chunkSize` bytes from the wrapped InputStream. However, when fewer bytes
+    * are available, the chunks might be smaller than `chunkSize`. If the wrapped InputStream has a good `available()`
+    * implementation, consider wrapping the wrapped InputStream with a `BufferedInputStream`. If the chunks are still
+    * too small, then consider re-chunking the outgoing ZStream, e.g. with `ZStream.rechunk`.
+    *
+    * @param chunkSize
+    *   The maximum chunk size of the outgoing ZStream. Defaults to `ZStream.DefaultChunkSize` (4KiB).
     * @param queueSize
     *   Chunks of the incoming ZStream go through an internal queue. This parameter determines the size of that queue.
     *   Defaults to 2.
+    * @param makeInputStream
+    *   Create the wrapped InputStream.
     * @return
     *   The created pipeline.
     */
   def viaInputStreamByte(
-      makeInputStream: InputStream => InputStream,
+      chunkSize: Int = ZStream.DefaultChunkSize,
       queueSize: Int = Defaults.DefaultChunkedQueueSize
-  ): ZPipeline[Any, Throwable, Byte, Byte] =
+  )(makeInputStream: InputStream => InputStream): ZPipeline[Any, Throwable, Byte, Byte] =
     viaInputStream[Byte](queueSize) { inputStream =>
-      ZIO.attemptBlocking(ZStream.fromInputStream(makeInputStream(inputStream)))
+      ZIO.attemptBlocking(ZStream.fromInputStream(makeInputStream(inputStream), chunkSize))
     }
 
   /** Makes a pipeline that makes the incoming ZStream available for reading via an InputStream. This is then used by
     * function `streamReader` to produce the outgoing ZStream.
     *
+    * This illustrates how data flows in the pipeline implementation:
+    * {{{
+    * Incoming ZStream --> queue <-- InputStream <-- wrapped InputStream <--streamReader-- outgoing ZStream
+    *
+    * --> push
+    * <-- pull
+    * }}}
+    *
     * @param queueSize
-    *   Chunks of the incoming ZStream go through an internal queue. This parameter determines the size of that queue.
+    *   Chunks of the incoming ZStream go to an internal queue. This parameter determines the size of that queue.
     *   Defaults to 2.
     * @param streamReader
     *   A ZIO that reads from the given incoming InputStream to produce the outgoing ZStream. The outgoing ZStream must
@@ -51,7 +74,7 @@ private[compress] object JavaIoInterop {
             .map(Take.chunk)
             .run(ZSink.fromQueue(queue))
             .onDoneCause(
-              cause => queue.offer(Take.failCause(cause)),
+              (cause: Cause[Throwable]) => queue.offer(Take.failCause(cause)),
               _ => queue.offer(Take.end)
             )
             .forkScoped
@@ -61,11 +84,34 @@ private[compress] object JavaIoInterop {
       }
     }
 
-  /** Makes a pipeline that captures the output of an OutputStream (created by `makeOutputStream`) and makes it
-    * available as the outgoing ZStream. The incoming ZStream of bytes is written to the OutputStream.
+  /** Makes a pipeline that captures the output of an OutputStream and makes it available as the outgoing ZStream. The
+    * OutputStream can then be wrapped (via `makeOutputStream`). The incoming ZStream of bytes is written to the wrapped
+    * OutputStream.
     *
-    * @see
-    *   [[viaOutputStream]]
+    * This illustrates how data flows in the pipeline implementation:
+    * {{{
+    * Incoming ZStream --> wrapping OutputStream --> buffered OutputStream --> queue <-- outgoing ZStream
+    *
+    * --> push
+    * <-- pull
+    * }}}
+    *
+    * Often, the wrapping OutputStreams needs to write to its underlying outputStream immediately (from the
+    * constructor). Usually this is just a few bytes, for example a magic header indicating file type. Since the
+    * internal queue is bounded (see parameter `queueSize`), and the queue reader starts later, there is limited space
+    * for this data. To be precise, `queue-size * chunk-size` bytes (defaults to 2 * 64KiB = 128KiB) are available.
+    *
+    * The wrapped OutputStream is closed when the incoming ZStream ends.
+    *
+    * @param makeOutputStream
+    *   A function that creates the wrapped OutputStream from an OutputStream that writes to the internal queue.
+    * @param chunkSize
+    *   The chunk size of the outgoing ZStream (also the size of the buffer in the buffered OutputStream). Defaults to
+    *   64KiB.
+    * @param queueSize
+    *   The internal queue size. Defaults to 2.
+    * @return
+    *   The created pipeline.
     */
   def viaOutputStreamByte(
       makeOutputStream: OutputStream => OutputStream,
@@ -76,30 +122,36 @@ private[compress] object JavaIoInterop {
       stream.runForeachChunk(chunk => ZIO.attemptBlocking(outputStream.write(chunk.toArray)))
     }
 
-  /** Makes a pipeline that captures the output of an OutputStream of type `OS` (created by `makeOutputStream`) and
-    * makes it available as the outgoing ZStream. The input ZStream (with items of type `In`) is written to the
-    * OutputStream by `streamWriter`.
+  /** Makes a pipeline that captures the output of an OutputStream and makes it available as the outgoing ZStream. The
+    * OutputStream can then be wrapped (via `makeOutputStream`). The input ZStream (with items of type `In`) is written
+    * to the wrapped OutputStream by `streamWriter`.
     *
-    * Many of these OutputStreams immediately start writing to their underlying outputStream from their constructor.
-    * (Usually just a few bytes, for example a magic header indicating file type.) Since the internal queue is bounded
-    * (see `queueSize`), and the queue reader starts last, the output stream is buffered. The buffer needs to be large
-    * enough to fit all the initially written data. Each time the buffer fills up, the pipeline produces a chunk in the
-    * outgoing ZStream. Therefore, the buffer size is set with the `chunkSize` parameter. With the default settings we
-    * get large buffers and a small queue.
+    * This illustrates how data flows in the pipeline implementation:
+    * {{{
+    * Incoming ZStream --streamWriter--> wrapping OutputStream --> buffered OutputStream --> queue --> outgoing ZStream
+    * }}}
+    *
+    * Often, the wrapping OutputStreams needs to write to its underlying outputStream immediately (from the
+    * constructor). Usually this is just a few bytes, for example a magic header indicating file type. Since the
+    * internal queue is bounded (see parameter `queueSize`), and the queue reader starts later, there is limited space
+    * for this data. To be precise, `queue-size * chunk-size` bytes (defaults to 2 * 64KiB = 128KiB) are available.
+    *
+    * The wrapped OutputStream is closed when the incoming ZStream ends.
     *
     * @param makeOutputStream
-    *   Create the wrapped OutputStream.
+    *   A function that creates the wrapped OutputStream from an OutputStream that writes to the internal queue.
     * @param chunkSize
-    *   The internal buffer size, also the chunk size of the outgoing ZStream, defaults to 64KiB.
+    *   The chunk size of the outgoing ZStream (also the size of the buffer in the buffered OutputStream). Defaults to
+    *   64KiB.
     * @param queueSize
-    *   The internal queue size, defaults to 2.
+    *   The internal queue size. Defaults to 2.
     * @param streamWriter
-    *   Function that writes items from the given incoming ZStream to the given OutputStream. The OutputStream should
-    *   _not_ be closed when the stream ends.
+    *   Function that writes items from the incoming ZStream to the wrapped OutputStream. The wrapped OutputStream
+    *   should _not_ be closed when the incoming ZStream ends.
     * @tparam In
     *   Type of incoming items.
     * @tparam OS
-    *   Type of the OutputStream.
+    *   Type of the wrapping OutputStream.
     * @return
     *   The created pipeline.
     */

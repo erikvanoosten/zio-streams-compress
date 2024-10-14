@@ -14,6 +14,13 @@ import java.io.IOException
 import java.time.Instant
 
 object Zip4JArchiver {
+
+  /** Makes a pipeline that accepts a stream of archive entries (with size), and produces a byte stream of a Zip archive
+    * (method: deflate, level: 5).
+    *
+    * @param password
+    *   password of the ZIP archive, or `None` if the archive is not password protected
+    */
   def make(password: => Option[String] = None): Zip4JArchiver =
     new Zip4JArchiver(password)
 }
@@ -36,6 +43,14 @@ class Zip4JArchiver private (password: => Option[String]) extends Archiver[Some]
 }
 
 object Zip4JUnarchiver {
+
+  /** Makes a pipeline that accepts a byte stream of a ZIP archive, and produces a stream of archive entries.
+    *
+    * @param password
+    *   password of the ZIP archive, or `None` if the archive is not password protected
+    * @param chunkSize
+    *   chunkSize of the archive entry content streams. Defaults to 64KiB.
+    */
   def make(
       password: Option[String] = None,
       chunkSize: Int = Defaults.DefaultChunkSize
@@ -46,7 +61,7 @@ object Zip4JUnarchiver {
 class Zip4JUnarchiver private (password: Option[String], chunkSize: Int) extends Unarchiver[Option, LocalFileHeader] {
   override def unarchive
       : ZPipeline[Any, Throwable, Byte, (ArchiveEntry[Option, LocalFileHeader], ZStream[Any, IOException, Byte])] =
-    viaInputStream[(ArchiveEntry[Option, LocalFileHeader], ZStream[Any, IOException, Byte])](chunkSize) { inputStream =>
+    viaInputStream[(ArchiveEntry[Option, LocalFileHeader], ZStream[Any, IOException, Byte])]() { inputStream =>
       for {
         zipInputStream <- ZIO.acquireRelease(
           ZIO.attemptBlocking(new ZipInputStream(inputStream, password.map(_.toCharArray).orNull))
@@ -59,6 +74,7 @@ class Zip4JUnarchiver private (password: Option[String], chunkSize: Int) extends
             entry <- ZIO.attemptBlocking(Option(zipInputStream.getNextEntry)).some
           } yield {
             val archiveEntry = ArchiveEntry.fromUnderlying(entry)
+            // ZipInputStream.read seems to do its best to read the requested number of bytes. No buffering is needed.
             (archiveEntry, ZStream.fromInputStream(zipInputStream, chunkSize))
           }
         }
